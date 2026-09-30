@@ -1,0 +1,54 @@
+# 自动打包发布：推送 v* 标签或手动触发时，打包插件目录并创建 GitHub Release。
+# 结构参照 assistant.koplugin 的 release workflow（omer-faruq/assistant.koplugin）：
+#   tag 触发 → 组装 PACKAGE_NAME/ 目录 → 改写 _meta.lua 版本号 → zip → softprops 发布。
+# 差异：本仓库根目录即插件目录；用 .gitattributes 的 export-ignore 排除
+# docs/ tests/ .github（git archive 原生支持，无需额外排除脚本）；
+# 打包前先运行 tests/ajbk_test.py 桌面测试作为质量门。
+
+name: Create Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build_and_release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      PACKAGE_NAME: AJBK.koplugin
+      ARCHIVE_NAME: AJBK.koplugin-${{ github.ref_name }}.zip
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Run desktop unit tests
+        run: |
+          pip install lupa
+          python tests/ajbk_test.py
+
+      - name: Assemble package directory
+        run: |
+          rm -rf "$PACKAGE_NAME" "$ARCHIVE_NAME"
+          # export-ignore（.gitattributes）自动排除 docs/ tests/ .github 等
+          git archive --format=tar --prefix="$PACKAGE_NAME/" "${{ github.sha }}" | tar xf -
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "Setting version to $VERSION in $PACKAGE_NAME/_meta.lua"
+          sed -i -E "s/(version[[:space:]]*=[[:space:]]*)[^,]+/\1\"${VERSION}\"/" "$PACKAGE_NAME/_meta.lua"
+          cat "$PACKAGE_NAME/_meta.lua"
+
+      - name: Create zip archive
+        run: |
+          zip -r "$ARCHIVE_NAME" "$PACKAGE_NAME"
+          unzip -l "$ARCHIVE_NAME"
+
+      - name: Create Release and Upload Asset
+        uses: softprops/action-gh-release@v3
+        with:
+          prerelease: false
+          make_latest: true
+          generate_release_notes: true
+          files: ${{ env.ARCHIVE_NAME }}
