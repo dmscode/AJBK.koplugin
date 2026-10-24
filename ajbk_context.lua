@@ -13,6 +13,8 @@ crengine 专有方法一律经 pcall：PDF/图片型文档没有这些方法，
 local util = require("util")
 local _ = require("gettext")
 local T = require("ffi/util").template
+-- settings 不反向依赖本模块，这里不会构成循环 require
+local AjbkSettings = require("ajbk_settings")
 
 local AjbkContext = {}
 
@@ -24,6 +26,51 @@ local MAX_SENTENCE_CHARS = 200
 -- 被查询的正文不当作"上下文"处理：它是用户真正要查的东西，截断会让模型
 -- 解释的和结果窗口标题里显示的不是同一段文字。1000 字符只是防呆上限。
 local MAX_SELECTION_CHARS = 1000
+
+--- 选区类型的显示名。key 与 AjbkSettings.SELECTION_HINTS 一一对应。
+--- 存中文原文、用时再 _()，避免模块加载时把界面语言钉死。
+local SELECTION_KIND_LABELS = {
+    single = "单字",
+    cut = "词片段",
+    maybe = "可能是半个词",
+    long = "长短语",
+    complete = "完整词条",
+}
+
+--- 句读标点。必须逐个 plain 查找：Lua 的字符类是按字节匹配的，
+--- 把「。」「！」这类多字节标点写进 [..] 会连别的汉字字节一起命中
+--- （例如「漏」的 UTF-8 字节里含 0xBC，正对上「！」的中间字节）。
+local SENTENCE_PUNCT = { "。", "！", "？", "；", "：", "，", "、", ",", ";", "!", "?" }
+
+local function hasSentencePunct(text)
+    for _, p in ipairs(SENTENCE_PUNCT) do
+        if text:find(p, 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
+--- 整句/长短语：不该被当成一个词去解释，否则模型会自作主张从里面挑一个词。
+--- 判据：含句读标点，或汉字 10 个以上，或西文 4 个词以上。
+--- 阈值故意偏高：实测 5~8 字的成语、俗语、诗句由"完整词条"处理得更好
+--- （能给出拼音与「成语」词性），"长短语"会把读音留成 —。
+local function isLongSelection(text, n)
+    if type(text) ~= "string" or text == "" then
+        return false
+    end
+    if hasSentencePunct(text) then
+        return true
+    end
+    if util.hasCJKChar(text) then
+        return n >= 10
+    end
+    local words = 0
+    for _ in text:gmatch("%S+") do
+        words = words + 1
+    end
+    return words >= 4
+end
 
 --- 星期名在调用时取翻译：模块加载时取值会把界面语言固定在启动那一刻
 --- （切换语言后菜单/提示不跟着变），与 PLACEHOLDERS 的约定保持一致。
@@ -193,6 +240,19 @@ function AjbkContext.build(ui, selection, selected_text, provider, model)
 
     local pos0 = type(selected_text) == "table" and selected_text.pos0 or nil
     local pos1 = type(selected_text) == "table" and selected_text.pos1 or nil
+    -- 选区类型：插件只做"能确定的那部分判断"，模糊情形交给模型自己决定。
+    local kind
+    if not (doc and pos0 and pos1) then
+        -- 手动输入或文件管理器查询：没有坐标，只剩字数可依据
+        local n0 = charCount(vars.selection)
+        if n0 <= 1 then
+            kind = "single"
+        elseif isLongSelection(vars.selection, n0) then
+            kind = "long"
+        else
+            kind = "complete"
+        end
+    end
     if doc and pos0 and pos1 then
         -- 前后文走内置查询用过的同一入口；restore_selection=true 让 crengine 在
         -- 取完文字后重新记住选区，否则页面上的选中范围不再绘制。
@@ -217,41 +277,34 @@ function AjbkContext.build(ui, selection, selected_text, provider, model)
         local glued_left = isWordChar(left_pos and textBetween(doc, left_pos, pos0) or "")
         local glued_right = isWordChar(right_pos and textBetween(doc, pos1, right_pos) or "")
         local n = charCount((type(selected_text) == "table" and selected_text.text) or vars.selection)
-        -- 自检说的是"屏幕上实际选了多少字"，用原始选区算；{{selection_chars}} 报的是
-        -- 清洗后真正送进提示词的字数，两者可能差一个标点，各自都对。
-        local n_text = tostring(n)
-        local partial
         if n <= 1 then
-            partial = true
+            -- 单字：绝大多数字能独立成词，剩下的要看搭配，交给模型按提示判断
+            kind = "single"
+        elseif isLongSelection(vars.selection, n) then
+            -- 整句/长短语优先于"粘连"判断：模型看到一整句会自己挑一个词来解释
+            kind = "long"
         elseif util.hasCJKChar(vars.selection) then
-            -- 中文两字词很常见，只有两侧都被粘住才怀疑"只选到半个词"
-            partial = n <= 2 and glued_left and glued_right
+            -- 汉字之间本来就不加空格，两侧"粘连"是常态，不能据此断言选区不完整：
+            -- 两字词（电话）和半个三字词（选中"计算"）从字符上看一模一样。
+            kind = (glued_left and glued_right) and "maybe" or "complete"
         else
-            -- 西文反过来：两侧都粘连说明恰好选中整个单词，只有一侧粘连才是切开了
-            partial = glued_left or glued_right
-        end
-        if partial then
-            local side
-            if glued_left and glued_right then
-                side = _("两侧")
-            elseif glued_left then
-                side = _("左侧")
-            elseif glued_right then
-                side = _("右侧")
-            end
-            if side then
-                vars.fragment_note = T(_("【选区自检】本次只选中 %1 个字符，且%2与相邻文字直接相连，很可能只是词的一部分。请先解释该片段本身，再给出它最可能所属的完整词条。"),
-                    n_text, side)
-            elseif n <= 1 then
-                vars.fragment_note = T(_("【选区自检】本次只选中 %1 个字符。若该字更常作为多字词的一部分出现，请在解释本字之后列出常见词条。"),
-                    n_text)
-            end
+            -- 西文相反：两侧都贴着字母说明前后有空格，正好是整个单词；
+            -- 只有一侧粘连才是被切开（选到 philoso，原文是 philosopher）。
+            kind = (glued_left ~= glued_right) and "cut" or "complete"
         end
 
         -- 取粘连字符用的也是 getTextFromXPointers，它会把 crengine 的选区绘制抹掉，
         -- 这里补画一次，否则查询期间用户看不到自己选中的范围。
         callDoc(doc, "getTextFromXPointers", pos0, pos1, true)
     end
+
+    vars.selection_kind = _(SELECTION_KIND_LABELS[kind] or "")
+    -- 提示词模板末尾的 {{fragment_note}}：完整词条时是"别多写"的一句，
+    -- 单字/切半/存疑时才给分层解释的指令。用户改模板时删掉这个占位符即可关闭。
+    vars.fragment_note = AjbkSettings.SELECTION_HINTS[kind] or ""
+    -- 没有原文就没有语境可依，得让模型知道：别猜语境、别标「（本句）」。
+    -- 查词窗口按钮与主菜单手动查询都走这条路径。
+    vars.lookup_note = (vars.sentence == "") and (AjbkSettings.LOOKUP_NOTE or "") or ""
 
     return vars
 end

@@ -253,6 +253,10 @@ local S = dofile([[@@BASE@@/ajbk_settings.lua]])
 S.setConfigPath([[@@TMP@@/ajbk_config_test.lua]])
 check("配置路径注入", S.getConfigPath():find("ajbk_config_test%.lua") ~= nil)
 check("默认提示词含占位符", S.DEFAULT_PROMPT:find("{{selection}}", 1, true) ~= nil)
+check("默认提示词是词典排版", S.DEFAULT_PROMPT:find("【读音】", 1, true) ~= nil and S.DEFAULT_PROMPT:find("（本句）", 1, true) ~= nil)
+local has_lookup_note = false
+for _i, ph in ipairs(S.PLACEHOLDERS) do if ph.key == "lookup_note" then has_lookup_note = true end end
+check("占位符含查询模式说明", has_lookup_note and #S.PLACEHOLDERS >= 22, tostring(#S.PLACEHOLDERS))
 
 local p1 = S.addProvider({ id = "a1", name = "甲", base_url = "https://x/v1", api_key = "", default_model = "m1" })
 local p_dup = S.addProvider({ id = "a1", name = "重复", base_url = "https://x/v1" })
@@ -429,12 +433,17 @@ check("上下文 元数据", vars.title == "山海经" and vars.authors == "佚�
 check("上下文 进度", vars.page == "7" and vars.pages == "100" and vars.percent == "7%")
 check("上下文 日期非空", #vars.date > 0 and #vars.time > 0)
 check("上下文 provider/model", vars.provider == "深度求索" and vars.model == "deepseek-chat")
-check("上下文 选区自检（中文两侧粘连）", vars.fragment_note:find("选区自检", 1, true) ~= nil, vars.fragment_note)
+check("上下文 选区类型（汉字两侧粘连=存疑）",
+    vars.selection_kind == "可能是半个词" and vars.fragment_note:find("【所在词】", 1, true) ~= nil,
+    vars.selection_kind .. " / " .. vars.fragment_note)
 
 -- 无坐标（查词窗口按钮、手动查询）：变量齐全但上下文为空，模板整行会被删掉
 local bare = C.build(ui, "饕餮", nil, nil, nil)
-check("上下文 无坐标时为空", bare.context == "" and bare.sentence == "" and bare.fragment_note == "")
+check("上下文 无坐标时为空",
+    bare.context == "" and bare.sentence == "" and bare.selection_kind == "完整词条")
 check("上下文 键齐全", bare.selection == "饕餮" and bare.provider == "" and bare.model == "")
+check("上下文 无原文时提示别猜语境", bare.lookup_note ~= "" and bare.lookup_note:find("没有原文", 1, true) ~= nil, bare.lookup_note)
+check("上下文 有原文时不插入该提示", vars.lookup_note == "", vars.lookup_note)
 
 -- PDF/无 crengine 方法：全部 pcall 兜底，不应抛错
 local empty = C.build({ document = {} }, "饕餮", { pos0 = "p0", pos1 = "p1" }, nil, nil)
@@ -443,12 +452,16 @@ check("上下文 缺方法不崩", empty.context == "" and empty.sentence == "" 
 -- 单个汉字、两侧不粘连：给出"只选中一个字符"的提示
 local single_doc = fakeDoc({ left_pos = nil, right_pos = nil })
 local single = C.build({ document = single_doc }, "饕", { pos0 = "p0", pos1 = "p1" }, nil, nil)
-check("选区自检 单字", single.fragment_note:find("1 个字符", 1, true) ~= nil, single.fragment_note)
+check("选区自检 单字",
+    single.selection_kind == "单字" and single.fragment_note:find("一个字符", 1, true) ~= nil,
+    single.selection_kind .. " / " .. single.fragment_note)
 
 -- 西文两侧都不粘连 = 完整单词，不应报警
 local latin_doc = fakeDoc({ left_pos = "L", right_pos = "R", chars = { ["L>p0"] = " ", ["p1>R"] = " " } })
 local latin = C.build({ document = latin_doc }, "elegy", { pos0 = "p0", pos1 = "p1" }, nil, nil)
-check("选区自检 西文完整词不报警", latin.fragment_note == "", latin.fragment_note)
+check("选区自检 西文完整词只写四行",
+    latin.selection_kind == "完整词条" and latin.fragment_note:find("不要补【所在词】", 1, true) ~= nil,
+    latin.selection_kind .. " / " .. latin.fragment_note)
 
 -- 句末标点不是词内字符：。、！？ 夹在两侧说明这是完整的词，不是被切开的半个词
 local punct_doc = fakeDoc({
@@ -456,7 +469,7 @@ local punct_doc = fakeDoc({
     chars = { ["L>p0"] = "。", ["p1>R"] = "，" },
 })
 local punct = C.build({ document = punct_doc }, "你好", { pos0 = "p0", pos1 = "p1" }, nil, nil)
-check("选区自检 中文标点不误报", punct.fragment_note == "", punct.fragment_note)
+check("选区自检 中文标点不误报", punct.selection_kind == "完整词条", punct.selection_kind)
 
 -- 带变音符号的西文单词：é 属于词内字符，两侧粘连才报警
 local accent_doc = fakeDoc({
@@ -464,7 +477,34 @@ local accent_doc = fakeDoc({
     chars = { ["L>p0"] = "é", ["p1>R"] = " " },
 })
 local accent = C.build({ document = accent_doc }, "cafe", { pos0 = "p0", pos1 = "p1" }, nil, nil)
-check("选区自检 变音字母算词内字符", accent.fragment_note:find("选区自检", 1, true) ~= nil, accent.fragment_note)
+check("选区自检 变音字母算词内字符",
+    accent.selection_kind == "词片段" and accent.fragment_note:find("完整单词", 1, true) ~= nil,
+    accent.selection_kind .. " / " .. accent.fragment_note)
+
+-- 手动查询（无坐标）：只能按字数判断，单字同样给出分层指令
+local manual_single = C.build(ui, "打", nil, nil, nil)
+check("选区自检 手动单字", manual_single.selection_kind == "单字"
+    and manual_single.fragment_note:find("【所在词】", 1, true) ~= nil, manual_single.selection_kind)
+
+-- 完整词条时，提示文字必须明确禁止追加内容（否则模型爱补一句）
+check("选区自检 完整词条不许追加",
+    vars.selection_kind == "可能是半个词" and latin.fragment_note:find("不要追加", 1, true) ~= nil)
+
+-- 整句/长短语：含句读标点或足够长时，不能让模型从里面挑一个词
+local sentence_doc = fakeDoc({ sentence = "他拿起电话，却不知道该说什么。" })
+local sentence_vars = C.build({ document = sentence_doc }, "他拿起电话，却不知道该说什么。",
+    { pos0 = "p0", pos1 = "p1" }, nil, nil)
+check("选区类型 整句算长短语", sentence_vars.selection_kind == "长短语"
+    and sentence_vars.fragment_note:find("照抄", 1, true) ~= nil, sentence_vars.selection_kind)
+
+-- 回归：多字节标点写进 Lua 字符类会按字节误命中其他汉字
+-- （「漏」的 UTF-8 里含 0xBC，正好是「！」的中间字节），4 字日文词必须仍是完整词条
+local jp_vars = C.build({ document = fakeDoc({}) }, "木漏れ日", { pos0 = "p0", pos1 = "p1" }, nil, nil)
+check("选区类型 日文词不被误判", jp_vars.selection_kind == "完整词条", jp_vars.selection_kind)
+
+-- 专名也按完整词条处理（7 字，无标点）
+local name_vars = C.build({ document = fakeDoc({}) }, "中华人民共和国", { pos0 = "p0", pos1 = "p1" }, nil, nil)
+check("选区类型 长专名算完整词条", name_vars.selection_kind == "完整词条", name_vars.selection_kind)
 
 -- 长选区不该被截断：查询正文就是用户要查的东西
 local long_text = string.rep("甲", 500)

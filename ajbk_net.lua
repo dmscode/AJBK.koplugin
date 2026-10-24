@@ -200,6 +200,9 @@ function AjbkNet.postProcess(text)
     -- 压缩空白
     text = text:gsub("[ \t]+\n", "\n")
     text = text:gsub("\n%s*\n+", "\n\n")
+    -- 行尾空格：模型爱在【词条】后面垫两个空格做"对齐"，字典窗口里会变成
+    -- 一段看不见的缩进，直接按行去掉
+    text = text:gsub("[ \t]+\n", "\n"):gsub("[ \t]+$", "")
     text = text:gsub("^%s+", ""):gsub("%s+$", "")
     return text
 end
