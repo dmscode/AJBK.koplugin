@@ -27,6 +27,9 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
+        with:
+          # 生成发布说明要读历史与上一个 tag，浅克隆只取一个提交会拿不到
+          fetch-depth: 0
 
       - name: Run desktop unit tests
         run: |
@@ -59,11 +62,41 @@ jobs:
           name: ${{ env.ARCHIVE_NAME }}
           path: ${{ env.ARCHIVE_NAME }}
 
+      - name: Write release notes
+        if: ${{ env.IS_TAG == 'true' }}
+        run: |
+          # 发布说明直接写正文，不用 generate_release_notes：本仓库不走 PR 流程，
+          # 自动生成的内容只有一行 Full Changelog 链接，等于没说明。
+          PREV="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
+          if [ -n "$PREV" ]; then
+            echo "变更范围：$PREV..$GITHUB_REF_NAME"
+            CHANGES="$(git log --no-merges --pretty=format:'- %s' "$PREV..$GITHUB_REF_NAME")"
+          else
+            echo "没有上一个 tag，列出到仓库起点"
+            CHANGES="$(git log --no-merges --pretty=format:'- %s' "$GITHUB_REF_NAME")"
+          fi
+          [ -n "$CHANGES" ] || CHANGES="- 详见提交历史"
+          {
+            echo "## 安装"
+            echo
+            echo "1. 下载 \`${ARCHIVE_NAME}\` 并解压"
+            echo "2. 把整个 \`${PACKAGE_NAME}\` 目录放进 \`koreader/plugins/\`"
+            echo "3. 重启 KOReader"
+            echo
+            echo "配置在 \`koreader/settings/ajbk_config.lua\`，升级不会覆盖它。"
+            echo
+            echo "## 本次改动"
+            echo
+            printf '%s\n' "$CHANGES"
+          } > release-notes.md
+          cat release-notes.md
+
       - name: Create Release and Upload Asset
         if: ${{ env.IS_TAG == 'true' }}
         uses: softprops/action-gh-release@v3
         with:
           prerelease: false
           make_latest: true
-          generate_release_notes: true
+          name: ${{ github.ref_name }}
+          body_path: release-notes.md
           files: ${{ env.ARCHIVE_NAME }}
