@@ -1,6 +1,11 @@
-# 运行时生成的用户配置（含 API Key），不得提交
+# 旧版运行时配置（v0.1 曾写在插件目录；现放到 KOReader 设置目录，仅防误提交）
 ajbk_config.lua
+# 设置目录写探针（异常退出可能残留一份）
+*.probe
 
 # Python
 __pycache__/
 *.pyc
+
+# 生图工具产物（memo 图）
+cloudflare-media/

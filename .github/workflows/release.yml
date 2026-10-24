@@ -1,6 +1,8 @@
-# 自动打包发布：推送 v* 标签或手动触发时，打包插件目录并创建 GitHub Release。
+# 自动打包发布：推送 v* 标签时打包插件目录并创建 GitHub Release。
 # 结构参照 assistant.koplugin 的 release workflow（omer-faruq/assistant.koplugin）：
 #   tag 触发 → 组装 PACKAGE_NAME/ 目录 → 改写 _meta.lua 版本号 → zip → softprops 发布。
+# workflow_dispatch 是"干跑"：只跑测试、组装并上传 artifact，不写版本号、不建 Release
+# （action-gh-release 必须有 tag，分支上调用会直接失败）。
 # 差异：本仓库根目录即插件目录；用 .gitattributes 的 export-ignore 排除
 # docs/ tests/ .github（git archive 原生支持，无需额外排除脚本）；
 # 打包前先运行 tests/ajbk_test.py 桌面测试作为质量门。
@@ -21,6 +23,7 @@ jobs:
     env:
       PACKAGE_NAME: AJBK.koplugin
       ARCHIVE_NAME: AJBK.koplugin-${{ github.ref_name }}.zip
+      IS_TAG: ${{ github.ref_type == 'tag' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -35,9 +38,13 @@ jobs:
           rm -rf "$PACKAGE_NAME" "$ARCHIVE_NAME"
           # export-ignore（.gitattributes）自动排除 docs/ tests/ .github 等
           git archive --format=tar --prefix="$PACKAGE_NAME/" "${{ github.sha }}" | tar xf -
-          VERSION="${GITHUB_REF_NAME#v}"
-          echo "Setting version to $VERSION in $PACKAGE_NAME/_meta.lua"
-          sed -i -E "s/(version[[:space:]]*=[[:space:]]*)[^,]+/\1\"${VERSION}\"/" "$PACKAGE_NAME/_meta.lua"
+          if [ "${IS_TAG}" = "true" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+            echo "Setting version to $VERSION in $PACKAGE_NAME/_meta.lua"
+            sed -i -E "s/(version[[:space:]]*=[[:space:]]*)[^,]+/\1\"${VERSION}\"/" "$PACKAGE_NAME/_meta.lua"
+          else
+            echo "非 tag 触发：干跑，保留 _meta.lua 里的版本号"
+          fi
           cat "$PACKAGE_NAME/_meta.lua"
 
       - name: Create zip archive
@@ -45,7 +52,15 @@ jobs:
           zip -r "$ARCHIVE_NAME" "$PACKAGE_NAME"
           unzip -l "$ARCHIVE_NAME"
 
+      - name: Upload artifact (dry run)
+        if: ${{ env.IS_TAG != 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARCHIVE_NAME }}
+          path: ${{ env.ARCHIVE_NAME }}
+
       - name: Create Release and Upload Asset
+        if: ${{ env.IS_TAG == 'true' }}
         uses: softprops/action-gh-release@v3
         with:
           prerelease: false
